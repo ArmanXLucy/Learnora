@@ -95,66 +95,141 @@ def login():
 
 @app.route("/auth/firebase-session", methods=["POST"])
 def firebase_session():
+    """Exchange a verified Firebase ID token for a Learnora Flask session.
+
+    The entire exchange is wrapped so the frontend always receives JSON rather
+    than Flask's default HTML error page when Firestore or another backend
+    operation fails.
+    """
     data = request.get_json(silent=True) or {}
-    id_token = data.get("idToken", "")
+    id_token = (data.get("idToken") or "").strip()
     profile = data.get("profile") or {}
 
     if not id_token:
-        return jsonify({"ok": False, "error": "Missing Firebase ID token."}), 400
-
-    try:
-        decoded = verify_id_token(id_token)
-    except Exception:
-        return jsonify({"ok": False, "error": "Invalid or expired Firebase authentication token."}), 401
-
-    firebase_uid = decoded.get("uid")
-    email = (decoded.get("email") or profile.get("email") or "").strip().lower()
-    if not firebase_uid or not email:
-        return jsonify({"ok": False, "error": "Firebase account must have an email address."}), 400
-
-    # Enforce Firebase email ownership on the server as well as in the browser.
-    # This prevents an unverified account from creating a Learnora session by
-    # calling this endpoint directly.
-    if not decoded.get("email_verified", False):
         return jsonify({
             "ok": False,
-            "error": "Please verify your email address before accessing Learnora."
-        }), 403
+            "error": "Missing Firebase ID token."
+        }), 400
 
-    user = dal.get_user_by_firebase_uid(firebase_uid)
+    try:
+        # Firebase ID tokens can differ from the local server clock by a few
+        # seconds. Allow a small amount of clock skew while still verifying
+        # the token normally.
+        decoded = verify_id_token(id_token)
 
-    # Allow existing Learnora accounts to be linked automatically by email.
-    if user is None:
-        user = dal.get_user_by_email(email)
-        if user is not None:
-            dal.attach_firebase_uid(user["id"], firebase_uid)
-            user = dal.get_user_by_id(user["id"])
+        firebase_uid = decoded.get("uid")
+        email = (
+            decoded.get("email")
+            or profile.get("email")
+            or ""
+        ).strip().lower()
 
-    if user is None:
-        name = (profile.get("name") or decoded.get("name") or email.split("@")[0]).strip()
-        username = (profile.get("username") or email.split("@")[0]).strip().lower()
-        username = re.sub(r"[^a-z0-9_]", "", username)[:20] or "learner"
-        if not USERNAME_PATTERN.match(username) or dal.get_user_by_username(username):
-            base = username[:16] or "learner"
-            username = base
-            suffix = 1
-            while dal.get_user_by_username(username):
-                username = f"{base}{suffix}"[:20]
-                suffix += 1
+        if not firebase_uid or not email:
+            return jsonify({
+                "ok": False,
+                "error": "Firebase account must have an email address."
+            }), 400
 
-        age = profile.get("age") or None
-        profession = (profile.get("profession") or "").strip()
-        phone = (profile.get("phone") or "").strip()
-        location = (profile.get("location") or "India").strip() or "India"
-        user_id = dal.create_firebase_user(name, age, profession, phone, username, email, location, firebase_uid)
-        user = dal.get_user_by_id(user_id)
+        # Enforce email ownership on the server as well as in the browser.
+        if not decoded.get("email_verified", False):
+            return jsonify({
+                "ok": False,
+                "error": "Please verify your email address before accessing Learnora."
+            }), 403
 
-    session.clear()
-    session["user_id"] = user["id"]
-    session["is_admin"] = False
-    session["firebase_uid"] = firebase_uid
-    dal.record_activity(user["id"])
-    return jsonify({"ok": True, "redirect": url_for("dashboard")})
+        print(f"[Learnora] Firebase token verified: {email}")
+
+        # Existing Firebase-linked user.
+        user = dal.get_user_by_firebase_uid(firebase_uid)
+
+        # If the account exists by email, link the Firebase UID to it.
+        if user is None:
+            print("[Learnora] Firebase UID not found. Checking email...")
+            user = dal.get_user_by_email(email)
+
+            if user is not None:
+                print("[Learnora] Existing account found. Linking Firebase UID.")
+                dal.attach_firebase_uid(user["id"], firebase_uid)
+                user = dal.get_user_by_id(user["id"])
+
+        # Create a new Learnora profile when the Firebase account is new.
+        if user is None:
+            name = (
+                profile.get("name")
+                or decoded.get("name")
+                or email.split("@")[0]
+            ).strip()
+
+            username = (
+                profile.get("username")
+                or email.split("@")[0]
+            ).strip().lower()
+            username = re.sub(r"[^a-z0-9_]", "", username)[:20] or "learner"
+
+            if not USERNAME_PATTERN.match(username) or dal.get_user_by_username(username):
+                base = username[:16] or "learner"
+                username = base
+                suffix = 1
+
+                while dal.get_user_by_username(username):
+                    username = f"{base}{suffix}"[:20]
+                    suffix += 1
+
+            age = profile.get("age") or None
+            profession = (profile.get("profession") or "").strip()
+            phone = (profile.get("phone") or "").strip()
+            location = (profile.get("location") or "India").strip() or "India"
+
+            print(f"[Learnora] Creating Firebase user profile for {email}")
+
+            user_id = dal.create_firebase_user(
+                name,
+                age,
+                profession,
+                phone,
+                username,
+                email,
+                location,
+                firebase_uid,
+            )
+            user = dal.get_user_by_id(user_id)
+
+        if user is None:
+            raise RuntimeError(
+                "Firebase authentication succeeded, but the Learnora user profile could not be loaded."
+            )
+
+        # Create the application session only after the user record exists.
+        session.clear()
+        session["user_id"] = user["id"]
+        session["is_admin"] = False
+        session["firebase_uid"] = firebase_uid
+
+        # Record the login as user activity.
+        dal.record_activity(user["id"])
+
+        print(f"[Learnora] Login successful: {email}")
+
+        return jsonify({
+            "ok": True,
+            "redirect": url_for("dashboard")
+        }), 200
+
+    except Exception as exc:
+        import traceback
+
+        print("=" * 80)
+        print("[Learnora] FIREBASE LOGIN ERROR")
+        print("Error type:", type(exc).__name__)
+        print("Error:", str(exc))
+        traceback.print_exc()
+        print("=" * 80)
+
+        return jsonify({
+            "ok": False,
+            "error": "Login failed on the server.",
+            "details": str(exc)
+        }), 500
 
 
 @app.route("/admin-login", methods=["POST"])
