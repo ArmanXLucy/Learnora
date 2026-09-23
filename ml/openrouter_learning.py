@@ -380,7 +380,7 @@ Return ONLY valid JSON:
     result = _generate([
         {"role": "system", "content": "You are Learnora's diagnostic assessment engine."},
         {"role": "user", "content": prompt.strip()},
-    ], max_tokens=12000)
+    ], max_tokens=7000)
 
     raw_sets = result.get("sets", [])
     if not isinstance(raw_sets, list):
