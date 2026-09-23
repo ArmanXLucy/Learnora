@@ -1,0 +1,5 @@
+.env
+serviceAccountKey.json
+*-firebase-adminsdk-*.json
+instance/syllabi/
+__pycache__/
