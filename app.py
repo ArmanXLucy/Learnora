@@ -4,6 +4,7 @@ import re
 import os
 import uuid
 import json
+import tempfile
 from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
 from functools import wraps
@@ -605,14 +606,35 @@ def start_skill(skill_id):
                 if ext not in allowed:
                     flash("Supported syllabus formats: JPG, JPEG, PNG, PDF, TXT, MD and DOCX.", "danger")
                     return redirect(url_for("start_skill", skill_id=skill_id))
-                syllabus_dir = os.path.join(app.root_path, "instance", "syllabi")
+                # Vercel Functions have a read-only deployed filesystem.
+                # Use the runtime temp directory for uploaded syllabi. The file
+                # only needs to exist long enough for OpenRouter/PDF/DOCX/image
+                # processing during this request.
+                syllabus_dir = os.path.join(
+                    tempfile.gettempdir(),
+                    "learnora",
+                    "syllabi",
+                )
                 os.makedirs(syllabus_dir, exist_ok=True)
+
                 filename = f"{user['id']}_{uuid.uuid4().hex}.{ext}"
-                saved_file = os.path.join(syllabus_dir, secure_filename(filename))
+                saved_file = os.path.join(
+                    syllabus_dir,
+                    secure_filename(filename),
+                )
                 upload.save(saved_file)
                 source = "file"
                 syllabus_name = secure_filename(upload.filename)
                 plan = analyze_syllabus(skill_id, file_path=saved_file)
+
+                # The AI has already consumed the uploaded file, so delete it
+                # immediately. /tmp is ephemeral and should not be treated as
+                # persistent storage.
+                try:
+                    os.remove(saved_file)
+                except OSError:
+                    pass
+                saved_file = None
             else:
                 flash("Choose a syllabus option.", "warning")
                 return redirect(url_for("start_skill", skill_id=skill_id))
@@ -940,6 +962,11 @@ def format_datetime(value, fmt="%d %b %Y %H:%M"):
 
 # ------------------------------------------------------------------- run --
 def bootstrap():
+    # Learnora uses Firestore for persistent application data. The legacy
+    # SQLite initializer writes under /var/task on Vercel, which is read-only.
+    # Keep it for local development only.
+    if os.environ.get("VERCEL") == "1":
+        return
     init_db()
 
 
