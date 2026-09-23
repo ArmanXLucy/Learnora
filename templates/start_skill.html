@@ -62,7 +62,14 @@
       <strong>Next:</strong> Learnora will show your syllabus roadmap first. Then OpenRouter AI will generate a 7-question diagnostic from basic → intermediate → advanced. Your result decides which level of content you see.
     </div>
 
-    <button type="submit" class="btn secondary block btn-big">Build my syllabus roadmap {{ icon("arrow-right", 17) }}</button>
+    <button type="submit" class="btn secondary block btn-big" id="build-btn">
+      <span id="build-btn-text">Build my syllabus roadmap {{ icon("arrow-right", 17) }}</span>
+      <span id="build-btn-loading" style="display:none;">Analyzing with AI… Please wait</span>
+    </button>
+    <div id="ai-loading" style="display:none; margin-top:14px; padding:14px 16px; border:1px solid var(--border,#e5e7eb); border-radius:14px; line-height:1.5;">
+      <strong>Learnora AI is working…</strong><br>
+      <span style="color:var(--muted);">Syllabus analysis can take 20–60 seconds, especially with free OpenRouter models. Please keep this page open.</span>
+    </div>
   </form>
 </div>
 {% endblock %}
@@ -75,6 +82,18 @@ function toggleSyllabusMode() {
   document.getElementById('text-panel').style.display = mode === 'text' ? 'block' : 'none';
 }
 toggleSyllabusMode();
+
+document.getElementById('syllabus-form')?.addEventListener('submit', function () {
+  const button = document.getElementById('build-btn');
+  const text = document.getElementById('build-btn-text');
+  const loading = document.getElementById('build-btn-loading');
+  const panel = document.getElementById('ai-loading');
+
+  if (button) button.disabled = true;
+  if (text) text.style.display = 'none';
+  if (loading) loading.style.display = 'inline';
+  if (panel) panel.style.display = 'block';
+});
 </script>
 <style>
 .syllabus-option{display:flex;gap:14px;align-items:flex-start;padding:16px;border:1px solid var(--border,#e5e7eb);border-radius:16px;cursor:pointer;background:rgba(255,255,255,.55)}

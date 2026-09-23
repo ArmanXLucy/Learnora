@@ -38,24 +38,52 @@ def _client():
     key = _key()
     if not key:
         raise RuntimeError("OPENROUTER_API_KEY is not configured. Add it to .env.")
-    return OpenAI(api_key=key, base_url=OPENROUTER_URL)
+    return OpenAI(
+        api_key=key,
+        base_url=OPENROUTER_URL,
+        timeout=180.0,
+    )
 
 
 def _extract_json(text):
     text = (text or "").strip()
+
+    if not text:
+        raise RuntimeError("OpenRouter returned an empty response. Please try again.")
+
+    # Remove common Markdown code fences.
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
     text = re.sub(r"\s*```$", "", text)
+
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as first_error:
+        # Some models add a short explanation around otherwise valid JSON.
+        # Extract the outermost JSON object/array when possible.
         starts = [i for i in (text.find("{"), text.find("[")) if i >= 0]
         if not starts:
-            raise
+            preview = text[:500].replace("\n", " ")
+            raise RuntimeError(
+                "OpenRouter returned non-JSON output. "
+                f"Response preview: {preview!r}"
+            ) from first_error
+
         start = min(starts)
         end = max(text.rfind("}"), text.rfind("]"))
         if end > start:
-            return json.loads(text[start:end + 1])
-        raise
+            candidate = text[start:end + 1]
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError as second_error:
+                raise RuntimeError(
+                    "OpenRouter returned malformed JSON. "
+                    f"Response preview: {text[:500]!r}"
+                ) from second_error
+
+        raise RuntimeError(
+            "OpenRouter returned incomplete JSON. "
+            f"Response preview: {text[:500]!r}"
+        ) from first_error
 
 
 def _chat(messages, *, max_tokens=5000, retries=3):
@@ -63,11 +91,29 @@ def _chat(messages, *, max_tokens=5000, retries=3):
     last_error = None
     for attempt in range(retries):
         try:
-            response = client.chat.completions.create(
-                model=_model(),
-                messages=messages,
-                max_tokens=max_tokens,
-            )
+            request_args = {
+                "model": _model(),
+                "messages": messages,
+                "max_tokens": max_tokens,
+            }
+
+            # Ask compatible OpenRouter models to return JSON directly. This
+            # greatly reduces failures where a model returns prose instead of
+            # the JSON expected by Learnora. If a routed provider does not
+            # support response_format, retry the same request without it.
+            try:
+                response = client.chat.completions.create(
+                    **request_args,
+                    response_format={"type": "json_object"},
+                )
+            except Exception as structured_exc:
+                print(
+                    "[OpenRouter] Structured JSON mode unavailable; retrying "
+                    "without response_format:",
+                    str(structured_exc),
+                )
+                response = client.chat.completions.create(**request_args)
+
             text = response.choices[0].message.content or ""
             if not text.strip():
                 raise RuntimeError("OpenRouter returned an empty response.")
